@@ -1,0 +1,3 @@
+[console_scripts]
+discord-daemon = daemon:run
+discord-tui = main:run

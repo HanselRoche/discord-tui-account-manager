@@ -1,0 +1,8 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+data/
+*.enc
+*.salt
+.DS_Store

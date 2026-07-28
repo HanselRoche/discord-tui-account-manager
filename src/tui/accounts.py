@@ -13,6 +13,15 @@ _STATE_STYLE = {
     ConnState.DEAD: ("✗ dead token", "red"),
 }
 
+# Colour for the Discord status dot (distinct from the gateway ConnState above).
+_STATUS_STYLE = {
+    "online": "green",
+    "idle": "yellow",
+    "dnd": "red",
+    "invisible": "grey50",
+    "offline": "grey50",
+}
+
 
 class AccountsTable(DataTable):
     """Rows map 1:1 to `Account` objects held by the app.
@@ -31,6 +40,7 @@ class AccountsTable(DataTable):
         self.add_column("label", width=16)
         self.add_column("username", width=22)
         self.add_column("state", width=16)
+        self.add_column("status", width=24)
         self.add_column("last result")
         self.refresh_rows()
 
@@ -43,11 +53,13 @@ class AccountsTable(DataTable):
     def _row_cells(self, acc: Account):
         sel = Text("[x]" if acc.selected else "[ ]", style="cyan" if acc.selected else "")
         state_text, style = _STATE_STYLE.get(acc.conn_state, ("?", ""))
+        status_style = _STATUS_STYLE.get(acc.status or "", "grey58")
         return (
             sel,
             Text(acc.label),
             Text(acc.username or "—"),
             Text(state_text, style=style),
+            Text(acc.status_display, style=status_style),
             Text(acc.last_result or "", style="grey58"),
         )
 

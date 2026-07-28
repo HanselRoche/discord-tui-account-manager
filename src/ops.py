@@ -5,11 +5,15 @@ handled by the presence manager over the gateway, not here -- see `presence_mana
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from enum import Enum
 
 from .discord_api import DiscordAPI
 from .models import Account
+
+# A custom/Nitro emoji as typed in Discord: <:name:id> or animated <a:name:id>.
+_CUSTOM_EMOJI = re.compile(r"^<a?:([A-Za-z0-9_]+):(\d+)>\s*(.*)$", re.DOTALL)
 
 
 class OpKind(str, Enum):
@@ -31,7 +35,7 @@ class OpSpec:
 
 
 OP_SPECS: list[OpSpec] = [
-    OpSpec(OpKind.CUSTOM_STATUS, "Custom status", "status text (emoji optional prefix)"),
+    OpSpec(OpKind.CUSTOM_STATUS, "Custom status", "text | 🔥 text | <:name:id> [text]"),
     OpSpec(OpKind.PRESENCE, "Presence (dot)", "online | idle | dnd | invisible", gateway=True),
     OpSpec(OpKind.BIO, "Bio (About Me)", "bio text"),
     OpSpec(OpKind.GLOBAL_NAME, "Display name", "new display name"),
@@ -68,19 +72,28 @@ async def run_http_op(account: Account, kind: OpKind, value: str) -> str:
             await api.set_banner(value.strip())
             return "banner updated"
         if kind is OpKind.CUSTOM_STATUS:
-            text, emoji = _split_status(value)
-            await api.set_settings_custom_status(text, emoji)
+            text, emoji_name, emoji_id = _split_status(value)
+            await api.set_settings_custom_status(text, emoji_name, emoji_id)
             return "custom status updated"
         raise ValueError(f"{kind} is not an HTTP op")
 
 
-def _split_status(value: str) -> tuple[str, str | None]:
-    """Allow an optional leading emoji: '🔥 grinding' -> ('grinding', '🔥')."""
+def _split_status(value: str) -> tuple[str, str | None, str | None]:
+    """Split a typed custom status into (text, emoji_name, emoji_id).
+
+    Handles a leading unicode emoji ('🔥 grinding' -> ('grinding', '🔥', None), or
+    emoji-only '🔥' -> ('', '🔥', None)) and a custom/Nitro emoji token
+    ('<:pepe:123> hi' -> ('hi', 'pepe', '123')). Plain text -> (text, None, None).
+    """
     value = value.strip()
     if not value:
-        return "", None
+        return "", None, None
+    m = _CUSTOM_EMOJI.match(value)
+    if m:
+        name, emoji_id, rest = m.group(1), m.group(2), m.group(3)
+        return rest.strip(), name, emoji_id
     first, _, rest = value.partition(" ")
-    # Treat a short non-word leading token as an emoji.
-    if rest and not first.isascii():
-        return rest.strip(), first
-    return value, None
+    # A non-ascii leading token is a unicode emoji (with or without trailing text).
+    if not first.isascii():
+        return rest.strip(), first, None
+    return value, None, None

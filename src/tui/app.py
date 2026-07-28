@@ -18,6 +18,21 @@ from .log import LogPane
 from .modals import AddTokenScreen, ConfirmScreen, PassphraseScreen
 
 
+def _fmt_custom(cs: dict | None) -> str | None:
+    """Render a settings custom_status object into 'emoji text' (or None).
+
+    A custom/Nitro emoji (has emoji_id, an image the terminal can't draw) is shown as
+    ':name:'; a unicode emoji is shown as-is.
+    """
+    if not isinstance(cs, dict):
+        return None
+    text = (cs.get("text") or "").strip()
+    name = cs.get("emoji_name")
+    emoji = f":{name}:" if (cs.get("emoji_id") and name) else name
+    rendered = f"{emoji} {text}".strip() if emoji else text
+    return rendered or None
+
+
 class ManagerApp(App):
     TITLE = "Discord Account Manager"
     CSS = """
@@ -95,6 +110,7 @@ class ManagerApp(App):
         for acc in self.accounts:
             if acc.label == key:
                 acc.conn_state = state
+                self._log.info(f"{acc.label} · {acc.ign}: {state.value}")
                 if self._table is not None:
                     self._table.refresh_rows()
                 break
@@ -105,11 +121,20 @@ class ManagerApp(App):
         try:
             async with DiscordAPI(acc.token) as api:
                 me = await api.whoami()
-            acc.user_id = me.get("id")
-            acc.username = me.get("username")
-            acc.global_name = me.get("global_name")
+                acc.user_id = me.get("id")
+                acc.username = me.get("username")
+                acc.global_name = me.get("global_name")
+                # Settings failure must not drop the identity we just fetched.
+                try:
+                    settings = await api.get_settings()
+                    acc.status = settings.get("status")
+                    acc.custom_status = _fmt_custom(settings.get("custom_status"))
+                except ApiError:
+                    pass
+            self._log.info(f"{acc.label} · {acc.ign} · {acc.status_display}")
         except ApiError as exc:
             acc.last_result = exc.message
+            self._log.fail(acc.label, exc.message)
         if self._table is not None:
             self._table.refresh_rows()
 
@@ -144,6 +169,11 @@ class ManagerApp(App):
         try:
             async with DiscordAPI(token) as api:
                 me = await api.whoami()
+                settings: dict = {}
+                try:
+                    settings = await api.get_settings()
+                except ApiError:
+                    pass
         except ApiError as exc:
             self._log.fail("add", f"token rejected: {exc.message}")
             return
@@ -151,10 +181,12 @@ class ManagerApp(App):
         acc.user_id = me.get("id")
         acc.username = me.get("username")
         acc.global_name = me.get("global_name")
+        acc.status = settings.get("status")
+        acc.custom_status = _fmt_custom(settings.get("custom_status"))
         self.accounts.append(acc)
         self._persist()
         self._table.refresh_rows()
-        self._log.ok("add", f"{acc.display} added")
+        self._log.ok("add", f"{acc.ign} · {acc.status_display} added")
         self.presence.add(acc)
 
     @work

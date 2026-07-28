@@ -106,6 +106,10 @@ class DiscordAPI:
     async def whoami(self) -> dict:
         return await self._request("GET", "/users/@me")
 
+    async def get_settings(self) -> dict:
+        """Current status + custom status (GET /users/@me/settings)."""
+        return await self._request("GET", "/users/@me/settings")
+
     async def set_bio(self, bio: str) -> dict:
         return await self._request("PATCH", "/users/@me/profile", {"bio": bio})
 
@@ -131,10 +135,19 @@ class DiscordAPI:
         """Persist the default status (visible next connect). Live dot = gateway."""
         return await self._request("PATCH", "/users/@me/settings", {"status": status})
 
-    async def set_settings_custom_status(self, text: str, emoji: str | None = None) -> dict:
-        cs: dict = {"text": text} if text else None
-        if cs and emoji:
-            cs["emoji_name"] = emoji
+    async def set_settings_custom_status(
+        self, text: str, emoji_name: str | None = None, emoji_id: str | None = None
+    ) -> dict:
+        """Set the custom status. Emoji-only (blank text) is allowed; a null object is
+        only sent when text and emoji are all empty (an explicit clear)."""
+        if not (text or emoji_name or emoji_id):
+            cs: dict | None = None
+        else:
+            cs = {"text": text or None}
+            if emoji_name:
+                cs["emoji_name"] = emoji_name
+            if emoji_id:
+                cs["emoji_id"] = emoji_id
         return await self._request(
             "PATCH", "/users/@me/settings", {"custom_status": cs}
         )

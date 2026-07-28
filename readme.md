@@ -53,7 +53,7 @@ On first launch you set a vault passphrase. Then:
 
 | Operation        | Value you type                                  |
 |------------------|-------------------------------------------------|
-| Custom status    | `text` or `🔥 text` (optional leading emoji)     |
+| Custom status    | `text`, `🔥 text`, or `<:name:id>` / `<a:name:id>` (custom emoji, text optional; emoji-only OK) |
 | Presence (dot)   | `online` \| `idle` \| `dnd` \| `invisible`       |
 | Bio (About Me)   | free text                                        |
 | Display name     | new global display name                          |

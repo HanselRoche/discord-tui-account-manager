@@ -12,7 +12,7 @@ import random
 from typing import Awaitable, Callable
 
 from .gateway import GatewayConnection
-from .models import Account, ConnState
+from .models import Account, ConnState, CustomStatus
 
 StateCallback = Callable[[str, ConnState], Awaitable[None] | None]
 PresenceLookup = Callable[[str], dict]
@@ -47,7 +47,9 @@ class PresenceManager:
             if i < len(accounts) - 1:
                 await asyncio.sleep(random.uniform(0.5, 2.5))
 
-    def add(self, account: Account, status: str | None = None, custom: str | None = None) -> None:
+    def add(
+        self, account: Account, status: str | None = None, custom: CustomStatus | None = None
+    ) -> None:
         """Start (or restart) a connection for one account."""
         key = self._key(account)
         if key in self._conns:
@@ -76,7 +78,7 @@ class PresenceManager:
         self,
         accounts: list[Account],
         status: str | None = None,
-        custom: str | None = None,
+        custom: CustomStatus | None = None,
     ) -> list[tuple[str, bool, str]]:
         """Push a live presence change to the given accounts. Returns per-account results."""
         results: list[tuple[str, bool, str]] = []
@@ -92,7 +94,7 @@ class PresenceManager:
                 await conn.update_presence(status=status, custom=custom)
                 what = status or ""
                 if custom is not None:
-                    what = f"{what} / {custom}".strip(" /")
+                    what = f"{what} / {custom.display()}".strip(" /")
                 results.append((acc.display, True, f"presence -> {what}"))
             except Exception as exc:  # noqa: BLE001 - surface any send failure
                 results.append((acc.display, False, str(exc)))

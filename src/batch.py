@@ -11,7 +11,7 @@ import random
 from typing import AsyncIterator
 
 from .discord_api import ApiError
-from .models import Account
+from .models import Account, CustomStatus
 from .ops import OpKind, run_http_op
 from .presence_manager import PresenceManager
 
@@ -45,9 +45,10 @@ async def run_op(
             acc.last_result = str(exc)
             yield (acc.display, False, str(exc))
 
-        # For a custom-status HTTP change, also push it live over the gateway.
+        # For a custom-status HTTP change, also push it live over the gateway
+        # (parsed, so text + emoji reach the gateway -- not the raw <:name:id> token).
         if kind is OpKind.CUSTOM_STATUS:
-            await presence.set_presence([acc], custom=value.strip())
+            await presence.set_presence([acc], custom=CustomStatus.parse(value))
 
         if i < len(accounts) - 1:
             await asyncio.sleep(BASE_DELAY + random.uniform(0, JITTER))

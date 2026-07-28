@@ -11,6 +11,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from .models import CustomStatus
+
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 CONFIG_PATH = DATA_DIR / "presence.json"
 
@@ -30,24 +32,27 @@ def load() -> dict[str, dict]:
 
 
 def for_label(label: str) -> dict:
-    """Presence for one account, falling back to DEFAULT."""
+    """Presence for one account. `custom` is a CustomStatus (or None to preserve)."""
     entry = load().get(label)
     if not entry:
-        return dict(DEFAULT)
-    return {"status": entry.get("status"), "custom": entry.get("custom")}
+        return {"status": None, "custom": None}
+    return {"status": entry.get("status"), "custom": CustomStatus.from_config(entry.get("custom"))}
 
 
-def set_for(label: str, status: str | None = None, custom: str | None = None) -> None:
+def set_for(
+    label: str, status: str | None = None, custom: CustomStatus | None = None
+) -> None:
     """Merge a change for one account and persist immediately.
 
-    Only non-None fields overwrite; the rest keep their stored value.
+    Only non-None fields overwrite; the rest keep their stored value. `custom` is
+    serialized (a plain string for text/unicode, a dict for a custom emoji).
     """
     cfg = load()
     entry = cfg.get(label, dict(DEFAULT))
     if status is not None:
         entry["status"] = status
     if custom is not None:
-        entry["custom"] = custom
+        entry["custom"] = custom.to_config()
     cfg[label] = entry
     _write(cfg)
 

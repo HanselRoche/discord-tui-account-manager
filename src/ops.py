@@ -5,15 +5,11 @@ handled by the presence manager over the gateway, not here -- see `presence_mana
 """
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 from enum import Enum
 
 from .discord_api import DiscordAPI
-from .models import Account
-
-# A custom/Nitro emoji as typed in Discord: <:name:id> or animated <a:name:id>.
-_CUSTOM_EMOJI = re.compile(r"^<a?:([A-Za-z0-9_]+):(\d+)>\s*(.*)$", re.DOTALL)
+from .models import Account, CustomStatus
 
 
 class OpKind(str, Enum):
@@ -72,28 +68,7 @@ async def run_http_op(account: Account, kind: OpKind, value: str) -> str:
             await api.set_banner(value.strip())
             return "banner updated"
         if kind is OpKind.CUSTOM_STATUS:
-            text, emoji_name, emoji_id = _split_status(value)
-            await api.set_settings_custom_status(text, emoji_name, emoji_id)
+            cs = CustomStatus.parse(value)
+            await api.set_settings_custom_status(cs.text, cs.emoji_name, cs.emoji_id)
             return "custom status updated"
         raise ValueError(f"{kind} is not an HTTP op")
-
-
-def _split_status(value: str) -> tuple[str, str | None, str | None]:
-    """Split a typed custom status into (text, emoji_name, emoji_id).
-
-    Handles a leading unicode emoji ('🔥 grinding' -> ('grinding', '🔥', None), or
-    emoji-only '🔥' -> ('', '🔥', None)) and a custom/Nitro emoji token
-    ('<:pepe:123> hi' -> ('hi', 'pepe', '123')). Plain text -> (text, None, None).
-    """
-    value = value.strip()
-    if not value:
-        return "", None, None
-    m = _CUSTOM_EMOJI.match(value)
-    if m:
-        name, emoji_id, rest = m.group(1), m.group(2), m.group(3)
-        return rest.strip(), name, emoji_id
-    first, _, rest = value.partition(" ")
-    # A non-ascii leading token is a unicode emoji (with or without trailing text).
-    if not first.isascii():
-        return rest.strip(), first, None
-    return value, None, None

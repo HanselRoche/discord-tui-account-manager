@@ -26,7 +26,7 @@ from typing import Awaitable, Callable
 import websockets
 
 from .discord_api import _CLIENT_UA
-from .models import ConnState
+from .models import ConnState, CustomStatus
 
 GATEWAY_URL = "wss://gateway.discord.gg/?v=9&encoding=json"
 
@@ -44,7 +44,7 @@ class GatewayConnection:
         account_id: str,
         token: str,
         status: str | None = None,
-        custom_status: str | None = None,
+        custom_status: CustomStatus | None = None,
         on_state: StateCallback | None = None,
     ):
         self.account_id = account_id
@@ -57,7 +57,7 @@ class GatewayConnection:
 
         # Existing presence captured from READY (what the account currently shows).
         self._ready_status: str | None = None
-        self._ready_custom: str | None = None
+        self._ready_custom: CustomStatus | None = None
 
         self._ws: websockets.WebSocketClientProtocol | None = None
         self._seq: int | None = None
@@ -97,7 +97,9 @@ class GatewayConnection:
     def state(self) -> ConnState:
         return self._state
 
-    async def update_presence(self, status: str | None = None, custom: str | None = None) -> None:
+    async def update_presence(
+        self, status: str | None = None, custom: CustomStatus | None = None
+    ) -> None:
         """Push a live presence change (op 3). Also becomes the default for reconnects."""
         if status is not None:
             self.status = status
@@ -116,7 +118,7 @@ class GatewayConnection:
         custom text. Stored so we can preserve fields the user did not configure.
         """
         status: str | None = None
-        custom: str | None = None
+        custom: CustomStatus | None = None
         sessions = d.get("sessions") or []
         chosen = next((s for s in sessions if s.get("session_id") == "all"), None)
         if chosen is None:
@@ -129,15 +131,14 @@ class GatewayConnection:
             status = chosen.get("status")
             for a in chosen.get("activities") or []:
                 if a.get("type") == 4:
-                    custom = a.get("state")
+                    custom = CustomStatus.from_activity(a)
                     break
-        if not custom:
+        if custom is None:
             settings = d.get("user_settings")
             cs = settings.get("custom_status") if isinstance(settings, dict) else None
-            if isinstance(cs, dict):
-                custom = cs.get("text")
+            custom = CustomStatus.from_settings(cs)
         self._ready_status = status
-        self._ready_custom = custom or None
+        self._ready_custom = custom
 
     async def _apply_presence_after_ready(self) -> None:
         """Send one op-3 that merges configured overrides with the account's existing
@@ -151,7 +152,7 @@ class GatewayConnection:
     def _effective_status(self) -> str:
         return self.status or self._ready_status or "online"
 
-    def _effective_custom(self) -> str | None:
+    def _effective_custom(self) -> CustomStatus | None:
         return self.custom_status if self.custom_status is not None else self._ready_custom
 
     # ---- connection loop -------------------------------------------------
@@ -312,12 +313,16 @@ class GatewayConnection:
     def _presence_body(self) -> dict:
         custom = self._effective_custom()
         activities = []
-        if custom:
-            activities.append({
+        if custom is not None and not custom.is_empty:
+            activity = {
                 "type": 4,  # custom status
                 "name": "Custom Status",
-                "state": custom,
-            })
+                "state": custom.text or None,
+            }
+            emoji = custom.activity_emoji()
+            if emoji:
+                activity["emoji"] = emoji
+            activities.append(activity)
         return {
             "status": self._effective_status(),
             "since": 0,

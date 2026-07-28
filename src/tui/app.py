@@ -9,7 +9,7 @@ from textual.widgets import Footer, Header
 from .. import presence_config, vault
 from ..batch import run_op
 from ..discord_api import ApiError, DiscordAPI
-from ..models import Account, ConnState
+from ..models import Account, ConnState, CustomStatus
 from ..ops import OpKind
 from ..presence_manager import PresenceManager
 from .accounts import AccountsTable
@@ -18,19 +18,10 @@ from .log import LogPane
 from .modals import AddTokenScreen, ConfirmScreen, PassphraseScreen
 
 
-def _fmt_custom(cs: dict | None) -> str | None:
-    """Render a settings custom_status object into 'emoji text' (or None).
-
-    A custom/Nitro emoji (has emoji_id, an image the terminal can't draw) is shown as
-    ':name:'; a unicode emoji is shown as-is.
-    """
-    if not isinstance(cs, dict):
-        return None
-    text = (cs.get("text") or "").strip()
-    name = cs.get("emoji_name")
-    emoji = f":{name}:" if (cs.get("emoji_id") and name) else name
-    rendered = f"{emoji} {text}".strip() if emoji else text
-    return rendered or None
+def _fmt_custom(cs: object) -> str | None:
+    """Render a settings custom_status object into display text (or None)."""
+    parsed = CustomStatus.from_settings(cs)
+    return parsed.display() if parsed else None
 
 
 class ManagerApp(App):
@@ -242,7 +233,7 @@ class ManagerApp(App):
             if req.kind is OpKind.PRESENCE:
                 presence_config.set_for(acc.label, status=value)
             elif req.kind is OpKind.CUSTOM_STATUS:
-                presence_config.set_for(acc.label, custom=value)
+                presence_config.set_for(acc.label, custom=CustomStatus.parse(value))
 
     # ---- shutdown --------------------------------------------------------
 

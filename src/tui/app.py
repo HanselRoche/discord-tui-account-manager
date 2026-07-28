@@ -76,8 +76,12 @@ class ManagerApp(App):
         self._table.accounts = self.accounts
         self._table.refresh_rows()
         self._log.info(f"vault unlocked: {len(self.accounts)} account(s)")
-        # Bring everyone online, then refresh identities.
-        self.run_worker(self.presence.start_all(self.accounts), exclusive=False)
+        # Bring everyone online (restoring each account's saved status/custom status from
+        # presence.json, same as the daemon), then refresh identities.
+        self.run_worker(
+            self.presence.start_all(self.accounts, presence_for=presence_config.for_label),
+            exclusive=False,
+        )
         for acc in self.accounts:
             self.run_worker(self._whoami(acc), exclusive=False)
 

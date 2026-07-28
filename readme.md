@@ -80,8 +80,10 @@ one-time prompt.
 DISCORD_VAULT_PASS=yourpass .venv/bin/python daemon.py
 ```
 
-`data/presence.json` (auto-created; gitignored) controls per-account presence. Missing
-entries default to `online`:
+`data/presence.json` (auto-created; gitignored) controls per-account presence. An entry
+with an explicit `"status"` is enforced. A **missing** entry (or `"status": null`) is
+**preserved** — the account keeps whatever it already shows (e.g. a custom status/dot set
+from the phone) instead of being forced `online`:
 ```json
 {
   "alt-1": { "status": "dnd",  "custom": "grinding" },
@@ -89,22 +91,63 @@ entries default to `online`:
 }
 ```
 
-**systemd** (`~/.config/systemd/user/discord-daemon.service`) — no tmux needed:
-```ini
-[Unit]
-Description=Discord Presence Daemon
-[Service]
-EnvironmentFile=%h/.discord-tui.env        # a file containing DISCORD_VAULT_PASS=...
-WorkingDirectory=%h/discord-tui-acc-manager
-ExecStart=%h/discord-tui-acc-manager/.venv/bin/python daemon.py
-Restart=on-failure
-[Install]
-WantedBy=default.target
-```
+### Run in the background on a VPS (systemd)
+
+Runs 24/7, restarts on crash, and — with lingering enabled — **survives you closing SSH /
+logging out**. No tmux needed. The unit file is shipped in `deploy/discord-daemon.service`.
+
 ```bash
+# 1. Passphrase in a 600 file, so the daemon can unlock the vault non-interactively
+printf 'DISCORD_VAULT_PASS=%s\n' 'YOUR_PASSPHRASE' > ~/.discord-tui.env
+chmod 600 ~/.discord-tui.env
+
+# 2. Install the unit shipped in the repo
+mkdir -p ~/.config/systemd/user
+cp ~/discord-tui-acc-manager/deploy/discord-daemon.service ~/.config/systemd/user/
+
+# 3. Keep it running after logout, then start it
+loginctl enable-linger "$USER"          # <-- without this, systemd --user stops when you disconnect
+systemctl --user daemon-reload
 systemctl --user enable --now discord-daemon
-journalctl --user -u discord-daemon -f     # watch logs
 ```
+
+Manage it:
+```bash
+systemctl --user status  discord-daemon    # is it up?
+systemctl --user restart discord-daemon    # apply new code / config
+systemctl --user stop    discord-daemon    # take accounts offline
+journalctl --user -u discord-daemon -f     # live logs
+```
+
+The unit (`deploy/discord-daemon.service`) pulls the passphrase from `~/.discord-tui.env`,
+runs `daemon.py` from `WorkingDirectory`, and `Restart=on-failure`.
+
+### Auto-deploy on push
+
+So you never SSH in to update code: the server polls `origin/main` every ~1 min and, on a
+new commit, `git pull --ff-only` + restarts the daemon. Tokens (`data/tokens.enc`) and the
+passphrase (env file) are **never** re-entered — `data/` is gitignored, so pulls never touch
+it. Poller + units live in `deploy/` (`deploy-check.sh`, `discord-deploy.service`,
+`discord-deploy.timer`).
+
+One-time install (full copy-paste in [`deploy/README.md`](deploy/README.md)):
+```bash
+cp ~/discord-tui-acc-manager/deploy/discord-deploy.{service,timer} ~/.config/systemd/user/
+chmod +x ~/discord-tui-acc-manager/deploy-check.sh
+systemctl --user daemon-reload
+systemctl --user enable --now discord-deploy.timer
+journalctl --user -t discord-deploy        # "updated ... daemon restarted" lines
+```
+
+After that, the everyday flow is just:
+```bash
+git push origin main       # from your laptop; the VPS updates itself within ~1 min
+```
+
+> **Security:** `~/.discord-tui.env` stores the master passphrase in plaintext (keep it
+> `600`). Anyone who can read it plus the repo can unlock every token — the cost of
+> unattended restart. Keep the server checkout read-only; never edit code on it directly, or
+> `git pull --ff-only` will refuse.
 
 ### TUI on a VPS (tmux)
 
@@ -135,4 +178,5 @@ src/presence_manager.py     owns all gateway connections
 src/ops.py                  operation registry + HTTP dispatch
 src/batch.py                run an op across accounts (sequential + jitter)
 src/tui/                    Textual UI (app, accounts, edit, log, modals)
+deploy/                     systemd units + git-poll auto-deploy (deploy-check.sh)
 ```

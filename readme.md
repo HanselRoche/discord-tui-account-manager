@@ -170,12 +170,26 @@ tmux new -s discord
 # detach: Ctrl-b then d   |   reattach: tmux attach -t discord
 ```
 
-### Running both at once
+### Editing while the daemon runs
 
-The daemon holds a gateway connection per account. If you also open the TUI on the same
-tokens, that's a **second** connection per account — Discord allows it (multi-device) but
-it's extra fingerprint. Normal flow: daemon runs 24/7; launch the TUI briefly to edit,
-then close it.
+The daemon has no UI — it just holds accounts online. To *change* anything, run the **TUI**
+(`main.py`) over SSH (in tmux, above); it shares the same vault and `presence.json`, so
+there's no conflict. What takes effect depends on the edit:
+
+| Edit | Applies to the running daemon |
+|------|-------------------------------|
+| Bio / display name / username / avatar / banner | **Instantly** — one-shot HTTPS, daemon-independent. |
+| Add / delete token | **After a daemon restart** — the account list is read once at startup. |
+| Presence / custom status | **After a daemon restart** — presence is read once at startup. (The TUI pushes it live *while open*, but that connection closes on quit.) |
+
+So after adding a token or changing presence, apply it to the 24/7 process:
+```bash
+systemctl --user restart discord-daemon
+```
+
+Caveat: while the TUI is open it holds a **second** gateway connection per account (alongside
+the daemon) — Discord allows it (multi-device) but it's extra fingerprint. Normal flow:
+daemon runs 24/7; launch the TUI briefly to edit, restart the daemon if needed, then close it.
 
 ## Layout
 

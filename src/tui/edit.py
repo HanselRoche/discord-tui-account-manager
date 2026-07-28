@@ -16,6 +16,7 @@ class EditRequest:
     kind: OpKind
     value: str
     scope: str  # "selected" | "all" | "current"
+    source: str = "tui"  # custom status only: "tui" (typed) | "discord" (pull current)
 
 
 class EditScreen(ModalScreen[EditRequest | None]):
@@ -27,7 +28,7 @@ class EditScreen(ModalScreen[EditRequest | None]):
     EditScreen { align: center middle; }
     #box {
         grid-size: 1;
-        grid-rows: auto auto auto auto auto auto;
+        grid-rows: auto auto auto auto auto auto auto auto;
         padding: 1 2;
         width: 66;
         height: auto;
@@ -52,6 +53,10 @@ class EditScreen(ModalScreen[EditRequest | None]):
             yield Label("Value", id="value-label")
             yield Input(placeholder="…", id="value")
             yield Label("", id="hint")
+            yield Label("Custom status source")
+            with RadioSet(id="source"):
+                yield RadioButton("Type value", value=True, id="source-tui")
+                yield RadioButton("Pull current from Discord", id="source-discord")
             with RadioSet(id="scope"):
                 yield RadioButton("Selected accounts", value=True, id="scope-selected")
                 yield RadioButton("All accounts", id="scope-all")
@@ -97,7 +102,7 @@ class EditScreen(ModalScreen[EditRequest | None]):
         if kind is Select.BLANK or kind is None:
             self.app.bell()
             return
-        self.dismiss(EditRequest(kind=kind, value=value, scope=scope))
+        self.dismiss(EditRequest(kind=kind, value=value, scope=scope, source=self._source()))
 
     def _scope(self) -> str:
         pressed = self.query_one("#scope", RadioSet).pressed_button
@@ -106,3 +111,9 @@ class EditScreen(ModalScreen[EditRequest | None]):
         return {"scope-selected": "selected", "scope-all": "all", "scope-current": "current"}[
             pressed.id
         ]
+
+    def _source(self) -> str:
+        pressed = self.query_one("#source", RadioSet).pressed_button
+        if pressed is None:
+            return "tui"
+        return {"source-tui": "tui", "source-discord": "discord"}[pressed.id]

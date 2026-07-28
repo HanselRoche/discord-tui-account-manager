@@ -220,20 +220,24 @@ class ManagerApp(App):
         return self._table.selected_accounts()
 
     async def _run_batch(self, req: EditRequest, targets: list[Account]) -> None:
-        async for who, ok, msg in run_op(req.kind, req.value, targets, self.presence):
+        async for who, ok, msg in run_op(
+            req.kind, req.value, targets, self.presence, source=req.source
+        ):
             self._log.result(who, ok, msg)
             self._table.refresh_rows()
         self._persist_presence(req, targets)
         self._log.info(f"{req.kind.value}: done")
 
     def _persist_presence(self, req: EditRequest, targets: list[Account]) -> None:
-        """Save presence/custom-status edits so the daemon restores them on restart."""
+        """Save presence-dot edits so the daemon restores them on restart.
+
+        Custom status is persisted inside `run_op` (with the exact CustomStatus,
+        including a custom emoji's id) as part of applying the change.
+        """
         value = req.value.strip()
         for acc in targets:
             if req.kind is OpKind.PRESENCE:
                 presence_config.set_for(acc.label, status=value)
-            elif req.kind is OpKind.CUSTOM_STATUS:
-                presence_config.set_for(acc.label, custom=CustomStatus.parse(value))
 
     # ---- shutdown --------------------------------------------------------
 

@@ -72,3 +72,10 @@ async def run_http_op(account: Account, kind: OpKind, value: str) -> str:
             await api.set_settings_custom_status(cs.text, cs.emoji_name, cs.emoji_id)
             return "custom status updated"
         raise ValueError(f"{kind} is not an HTTP op")
+
+
+async def pull_custom_status(account: Account) -> CustomStatus:
+    """Read the account's current custom status from Discord (exact emoji included)."""
+    async with DiscordAPI(account.token) as api:
+        settings = await api.get_settings()
+    return CustomStatus.from_settings(settings.get("custom_status")) or CustomStatus()

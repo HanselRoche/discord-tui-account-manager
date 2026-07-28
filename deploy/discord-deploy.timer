@@ -1,0 +1,9 @@
+[Unit]
+Description=Poll git for new Discord daemon code
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=1min
+
+[Install]
+WantedBy=timers.target

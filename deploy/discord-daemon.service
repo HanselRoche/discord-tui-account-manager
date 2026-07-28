@@ -1,0 +1,11 @@
+[Unit]
+Description=Discord Presence Daemon
+
+[Service]
+EnvironmentFile=%h/.discord-tui.env
+WorkingDirectory=%h/discord-tui-acc-manager
+ExecStart=%h/discord-tui-acc-manager/.venv/bin/python daemon.py
+Restart=on-failure
+
+[Install]
+WantedBy=default.target

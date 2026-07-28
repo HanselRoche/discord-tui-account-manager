@@ -43,15 +43,21 @@ class GatewayConnection:
         self,
         account_id: str,
         token: str,
-        status: str = "online",
+        status: str | None = None,
         custom_status: str | None = None,
         on_state: StateCallback | None = None,
     ):
         self.account_id = account_id
         self.token = token
+        # Configured overrides. None means "not configured" -> preserve whatever the
+        # account already has (e.g. a custom status set from the phone).
         self.status = status
         self.custom_status = custom_status
         self._on_state = on_state
+
+        # Existing presence captured from READY (what the account currently shows).
+        self._ready_status: str | None = None
+        self._ready_custom: str | None = None
 
         self._ws: websockets.WebSocketClientProtocol | None = None
         self._seq: int | None = None
@@ -99,6 +105,54 @@ class GatewayConnection:
             self.custom_status = custom
         if self._ws is not None and self._state is ConnState.ONLINE:
             await self._send(self._presence_payload_op3())
+
+    # ---- presence resolution --------------------------------------------
+
+    def _capture_ready_presence(self, d: dict) -> None:
+        """Read the account's current presence from READY (dot + custom status text).
+
+        Prefers the aggregate `sessions` entry (`session_id == "all"`), else any session
+        carrying a type-4 (custom status) activity. Falls back to user_settings for the
+        custom text. Stored so we can preserve fields the user did not configure.
+        """
+        status: str | None = None
+        custom: str | None = None
+        sessions = d.get("sessions") or []
+        chosen = next((s for s in sessions if s.get("session_id") == "all"), None)
+        if chosen is None:
+            chosen = next(
+                (s for s in sessions
+                 if any(a.get("type") == 4 for a in (s.get("activities") or []))),
+                None,
+            )
+        if chosen is not None:
+            status = chosen.get("status")
+            for a in chosen.get("activities") or []:
+                if a.get("type") == 4:
+                    custom = a.get("state")
+                    break
+        if not custom:
+            settings = d.get("user_settings")
+            cs = settings.get("custom_status") if isinstance(settings, dict) else None
+            if isinstance(cs, dict):
+                custom = cs.get("text")
+        self._ready_status = status
+        self._ready_custom = custom or None
+
+    async def _apply_presence_after_ready(self) -> None:
+        """Send one op-3 that merges configured overrides with the account's existing
+        presence. Sends nothing when there is nothing to enforce or preserve."""
+        if self.status is None and self.custom_status is None \
+                and self._ready_status is None and self._ready_custom is None:
+            return  # nothing configured and nothing to preserve: leave session default
+        if self._ws is not None and self._state is ConnState.ONLINE:
+            await self._send(self._presence_payload_op3())
+
+    def _effective_status(self) -> str:
+        return self.status or self._ready_status or "online"
+
+    def _effective_custom(self) -> str | None:
+        return self.custom_status if self.custom_status is not None else self._ready_custom
 
     # ---- connection loop -------------------------------------------------
 
@@ -168,7 +222,9 @@ class GatewayConnection:
                 resume_url = d.get("resume_gateway_url")
                 if resume_url:
                     self._resume_url = f"{resume_url}/?v=9&encoding=json"
+                self._capture_ready_presence(d)
                 await self._set_state(ConnState.ONLINE)
+                await self._apply_presence_after_ready()
             elif t == "RESUMED":
                 await self._set_state(ConnState.ONLINE)
         elif op == 1:  # server-requested heartbeat
@@ -232,7 +288,10 @@ class GatewayConnection:
                     "release_channel": "stable",
                     "client_build_number": 300000,
                 },
-                "presence": self._presence_body(),
+                # No presence here on purpose: a fresh session is online by default and
+                # the account's existing custom status stays intact. We read what the
+                # account currently shows from READY and (re)apply via op 3, so we never
+                # blank a phone-set custom status. See _apply_presence_after_ready.
                 "compress": False,
             },
         }
@@ -251,15 +310,16 @@ class GatewayConnection:
         return {"op": 3, "d": self._presence_body()}
 
     def _presence_body(self) -> dict:
+        custom = self._effective_custom()
         activities = []
-        if self.custom_status:
+        if custom:
             activities.append({
                 "type": 4,  # custom status
                 "name": "Custom Status",
-                "state": self.custom_status,
+                "state": custom,
             })
         return {
-            "status": self.status,
+            "status": self._effective_status(),
             "since": 0,
             "activities": activities,
             "afk": False,

@@ -14,7 +14,9 @@ from pathlib import Path
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 CONFIG_PATH = DATA_DIR / "presence.json"
 
-DEFAULT = {"status": "online", "custom": None}
+# None = "not configured" -> the gateway preserves whatever the account already shows
+# (e.g. a custom status / dot set from the phone) instead of forcing online / blank.
+DEFAULT = {"status": None, "custom": None}
 
 
 def load() -> dict[str, dict]:
@@ -32,7 +34,7 @@ def for_label(label: str) -> dict:
     entry = load().get(label)
     if not entry:
         return dict(DEFAULT)
-    return {"status": entry.get("status", "online"), "custom": entry.get("custom")}
+    return {"status": entry.get("status"), "custom": entry.get("custom")}
 
 
 def set_for(label: str, status: str | None = None, custom: str | None = None) -> None:

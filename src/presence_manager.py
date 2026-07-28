@@ -41,13 +41,13 @@ class PresenceManager:
             p = presence_for(acc.label) if presence_for else None
             self.add(
                 acc,
-                status=(p or {}).get("status", "online"),
+                status=(p or {}).get("status"),
                 custom=(p or {}).get("custom"),
             )
             if i < len(accounts) - 1:
                 await asyncio.sleep(random.uniform(0.5, 2.5))
 
-    def add(self, account: Account, status: str = "online", custom: str | None = None) -> None:
+    def add(self, account: Account, status: str | None = None, custom: str | None = None) -> None:
         """Start (or restart) a connection for one account."""
         key = self._key(account)
         if key in self._conns:

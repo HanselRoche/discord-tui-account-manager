@@ -1,6 +1,7 @@
 """Textual app tying vault, accounts table, presence manager, and ops together."""
 from __future__ import annotations
 
+from textual import work
 from textual.app import App, ComposeResult
 from textual.containers import Vertical
 from textual.widgets import Footer, Header
@@ -152,6 +153,7 @@ class ManagerApp(App):
         self._log.ok("add", f"{acc.display} added")
         self.presence.add(acc)
 
+    @work
     async def action_del_token(self) -> None:
         acc = self._table.cursor_account
         if acc is None:
@@ -167,6 +169,7 @@ class ManagerApp(App):
 
     # ---- run an op -------------------------------------------------------
 
+    @work
     async def action_edit(self) -> None:
         if not self.accounts:
             self._log.fail("edit", "no accounts")

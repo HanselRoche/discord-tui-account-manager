@@ -1,0 +1,6 @@
+[Unit]
+Description=Discord code deploy check
+
+[Service]
+Type=oneshot
+ExecStart=%h/discord-tui-acc-manager/deploy-check.sh

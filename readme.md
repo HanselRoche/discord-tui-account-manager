@@ -94,16 +94,28 @@ from the phone) instead of being forced `online`:
 ### Run in the background on a VPS (systemd)
 
 Runs 24/7, restarts on crash, and — with lingering enabled — **survives you closing SSH /
-logging out**. No tmux needed. The unit file is shipped in `deploy/discord-daemon.service`.
+logging out**. No tmux needed. The unit files are shipped in `deploy/`.
+
+The shipped units are templated with the placeholder path `%h/discord-tui-acc-manager`. The
+`sed` in the install rewrites it to **wherever you actually cloned the repo**, so this works
+regardless of the directory name (`%h` = your home; for root that's `/root`). Run from
+inside the repo:
 
 ```bash
+# 0. Point REPO at this checkout (path relative to your home dir)
+cd /path/to/your/clone          # e.g. cd ~/discord/discord-tui-account-manager
+REPO=${PWD#$HOME/}              # -> discord/discord-tui-account-manager
+
 # 1. Passphrase in a 600 file, so the daemon can unlock the vault non-interactively
 printf 'DISCORD_VAULT_PASS=%s\n' 'YOUR_PASSPHRASE' > ~/.discord-tui.env
 chmod 600 ~/.discord-tui.env
 
-# 2. Install the unit shipped in the repo
+# 2. Install all units, rewriting the placeholder path to YOUR clone
 mkdir -p ~/.config/systemd/user
-cp ~/discord-tui-acc-manager/deploy/discord-daemon.service ~/.config/systemd/user/
+for f in discord-daemon.service discord-deploy.service discord-deploy.timer; do
+  sed "s#%h/discord-tui-acc-manager#%h/$REPO#g" deploy/$f > ~/.config/systemd/user/$f
+done
+chmod +x deploy-check.sh
 
 # 3. Keep it running after logout, then start it
 loginctl enable-linger "$USER"          # <-- without this, systemd --user stops when you disconnect
@@ -130,14 +142,14 @@ passphrase (env file) are **never** re-entered — `data/` is gitignored, so pul
 it. Poller + units live in `deploy/` (`deploy-check.sh`, `discord-deploy.service`,
 `discord-deploy.timer`).
 
-One-time install (full copy-paste in [`deploy/README.md`](deploy/README.md)):
+The systemd step above already installed the deploy timer's units (the `sed` loop covers all
+three) and made `deploy-check.sh` executable — so there's nothing to re-copy. Just enable the
+timer:
 ```bash
-cp ~/discord-tui-acc-manager/deploy/discord-deploy.{service,timer} ~/.config/systemd/user/
-chmod +x ~/discord-tui-acc-manager/deploy-check.sh
-systemctl --user daemon-reload
 systemctl --user enable --now discord-deploy.timer
-journalctl --user -t discord-deploy        # "updated ... daemon restarted" lines
+journalctl --user -t discord-deploy        # "updated ... daemon restarted" (empty until first push)
 ```
+Full standalone copy-paste is in [`deploy/README.md`](deploy/README.md).
 
 After that, the everyday flow is just:
 ```bash

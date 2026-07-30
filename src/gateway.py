@@ -5,8 +5,12 @@ HELLO -> heartbeat loop -> IDENTIFY -> READY, with zombie detection, exponential
 backoff, and RESUME on reconnect. Presence (dot + custom status) is pushed live via
 op 3 PRESENCE UPDATE.
 
+Presence set from another device (phone, desktop client) arrives as an inbound
+SESSIONS_REPLACE dispatch and is reported via `on_presence` -- never answered with an
+op 3, so whichever side wrote last wins.
+
 Gateway opcodes used:
-  0  DISPATCH        (server -> us; READY, RESUMED, ...)
+  0  DISPATCH        (server -> us; READY, RESUMED, SESSIONS_REPLACE, ...)
   1  HEARTBEAT
   2  IDENTIFY
   3  PRESENCE UPDATE
@@ -21,12 +25,13 @@ from __future__ import annotations
 import asyncio
 import json
 import random
+import time
 from typing import Awaitable, Callable
 
 import websockets
 
 from .discord_api import _CLIENT_UA
-from .models import ConnState, CustomStatus
+from .models import PRESENCE_STATUSES, ConnState, CustomStatus
 
 GATEWAY_URL = "wss://gateway.discord.gg/?v=9&encoding=json"
 
@@ -34,6 +39,7 @@ GATEWAY_URL = "wss://gateway.discord.gg/?v=9&encoding=json"
 _FATAL_CLOSE_CODES = {4004, 4010, 4011, 4012, 4013, 4014}
 
 StateCallback = Callable[[str, ConnState], Awaitable[None] | None]
+PresenceCallback = Callable[[str, str | None, CustomStatus | None], Awaitable[None] | None]
 
 
 class GatewayConnection:
@@ -45,7 +51,9 @@ class GatewayConnection:
         token: str,
         status: str | None = None,
         custom_status: CustomStatus | None = None,
+        afk: bool | None = None,
         on_state: StateCallback | None = None,
+        on_presence: PresenceCallback | None = None,
     ):
         self.account_id = account_id
         self.token = token
@@ -53,11 +61,15 @@ class GatewayConnection:
         # account already has (e.g. a custom status set from the phone).
         self.status = status
         self.custom_status = custom_status
+        # None -> the default (True). Invisible to other users; see _effective_afk.
+        self.afk = afk
         self._on_state = on_state
+        self._on_presence = on_presence
 
-        # Existing presence captured from READY (what the account currently shows).
-        self._ready_status: str | None = None
-        self._ready_custom: CustomStatus | None = None
+        # What the account currently shows, as last seen from READY or SESSIONS_REPLACE.
+        self._observed_status: str | None = None
+        self._observed_custom: CustomStatus | None = None
+        self._user_id: str | None = None
 
         self._ws: websockets.WebSocketClientProtocol | None = None
         self._seq: int | None = None
@@ -98,28 +110,37 @@ class GatewayConnection:
         return self._state
 
     async def update_presence(
-        self, status: str | None = None, custom: CustomStatus | None = None
+        self,
+        status: str | None = None,
+        custom: CustomStatus | None = None,
+        afk: bool | None = None,
     ) -> None:
         """Push a live presence change (op 3). Also becomes the default for reconnects."""
         if status is not None:
             self.status = status
         if custom is not None:
             self.custom_status = custom
+        if afk is not None:
+            self.afk = afk
         if self._ws is not None and self._state is ConnState.ONLINE:
             await self._send(self._presence_payload_op3())
+            # See _apply_presence_after_ready: swallow the echo of our own change.
+            self._observed_status = self._effective_status()
+            self._observed_custom = self._effective_custom() or CustomStatus()
 
     # ---- presence resolution --------------------------------------------
 
-    def _capture_ready_presence(self, d: dict) -> None:
-        """Read the account's current presence from READY (dot + custom status text).
+    @staticmethod
+    def _presence_from_sessions(sessions: list | None) -> tuple[str | None, CustomStatus | None]:
+        """Pull dot + custom status out of a session list (READY.sessions or
+        SESSIONS_REPLACE, same shape).
 
-        Prefers the aggregate `sessions` entry (`session_id == "all"`), else any session
-        carrying a type-4 (custom status) activity. Falls back to user_settings for the
-        custom text. Stored so we can preserve fields the user did not configure.
+        Prefers the aggregate entry (`session_id == "all"`), else any session carrying a
+        type-4 (custom status) activity.
         """
         status: str | None = None
         custom: CustomStatus | None = None
-        sessions = d.get("sessions") or []
+        sessions = sessions or []
         chosen = next((s for s in sessions if s.get("session_id") == "all"), None)
         if chosen is None:
             chosen = next(
@@ -133,27 +154,82 @@ class GatewayConnection:
                 if a.get("type") == 4:
                     custom = CustomStatus.from_activity(a)
                     break
+        return status, custom
+
+    def _capture_ready_presence(self, d: dict) -> None:
+        """Read the account's current presence from READY (dot + custom status text).
+
+        Falls back to user_settings for the custom text. Stored so we can preserve fields
+        the user did not configure.
+        """
+        status, custom = self._presence_from_sessions(d.get("sessions"))
         if custom is None:
             settings = d.get("user_settings")
             cs = settings.get("custom_status") if isinstance(settings, dict) else None
             custom = CustomStatus.from_settings(cs)
-        self._ready_status = status
-        self._ready_custom = custom
+        self._observed_status = status
+        self._observed_custom = custom
+
+    async def _observe_presence(self, status: str | None, custom: CustomStatus | None) -> None:
+        """Record a presence change made elsewhere (phone, desktop client) and report it.
+
+        `None` means "this dispatch says nothing about that field" and leaves it alone --
+        a *cleared* custom status is an empty CustomStatus, not None.
+
+        Deliberately never answers with an op 3: last write wins, so a change made from
+        another device stands. It does become our new desired state, otherwise the next
+        reconnect would re-apply the stale configured override on top of it.
+        """
+        # "offline" (and anything unknown) isn't a value we may push back via op 3.
+        if status is not None and status not in PRESENCE_STATUSES:
+            status = None
+        changed_status = status is not None and status != self._observed_status
+        changed_custom = custom is not None and custom != self._observed_custom
+        if not changed_status and not changed_custom:
+            return  # our own op 3 echoing back, a duplicate dispatch, or nothing new
+        if changed_status:
+            self._observed_status = status
+            self.status = status
+        if changed_custom:
+            self._observed_custom = custom
+            self.custom_status = custom
+        if self._on_presence is not None:
+            res = self._on_presence(
+                self.account_id,
+                status if changed_status else None,
+                custom if changed_custom else None,
+            )
+            if asyncio.iscoroutine(res):
+                await res
 
     async def _apply_presence_after_ready(self) -> None:
         """Send one op-3 that merges configured overrides with the account's existing
-        presence. Sends nothing when there is nothing to enforce or preserve."""
+        presence. Sends nothing when there is nothing to enforce or preserve.
+
+        AFK is always worth enforcing though: a fresh session is non-AFK, so staying
+        silent means Discord keeps suppressing mobile push."""
         if self.status is None and self.custom_status is None \
-                and self._ready_status is None and self._ready_custom is None:
+                and self._observed_status is None and self._observed_custom is None \
+                and not self._effective_afk():
             return  # nothing configured and nothing to preserve: leave session default
         if self._ws is not None and self._state is ConnState.ONLINE:
             await self._send(self._presence_payload_op3())
+            # Discord replays what we just sent as a SESSIONS_REPLACE. Record it now so
+            # that echo doesn't look like a change made from another device.
+            self._observed_status = self._effective_status()
+            self._observed_custom = self._effective_custom() or CustomStatus()
 
     def _effective_status(self) -> str:
-        return self.status or self._ready_status or "online"
+        return self.status or self._observed_status or "online"
 
     def _effective_custom(self) -> CustomStatus | None:
-        return self.custom_status if self.custom_status is not None else self._ready_custom
+        return self.custom_status if self.custom_status is not None else self._observed_custom
+
+    def _effective_afk(self) -> bool:
+        """Default True: nobody is actually sitting at this client, and `afk` is what tells
+        Discord to keep delivering pings/DMs to the phone instead of assuming we'll see
+        them here. Not rendered to other users -- the visible dot is `status` alone."""
+        return True if self.afk is None else self.afk
 
     # ---- connection loop -------------------------------------------------
 
@@ -220,6 +296,7 @@ class GatewayConnection:
             if t == "READY":
                 d = msg["d"]
                 self._session_id = d.get("session_id")
+                self._user_id = (d.get("user") or {}).get("id")
                 resume_url = d.get("resume_gateway_url")
                 if resume_url:
                     self._resume_url = f"{resume_url}/?v=9&encoding=json"
@@ -228,6 +305,22 @@ class GatewayConnection:
                 await self._apply_presence_after_ready()
             elif t == "RESUMED":
                 await self._set_state(ConnState.ONLINE)
+            elif t == "SESSIONS_REPLACE":
+                # Fired whenever any of our sessions changes: this is how a status set
+                # from the phone reaches us. `d` is the session array itself.
+                status, custom = self._presence_from_sessions(msg.get("d"))
+                if status is not None:
+                    # The payload is a complete picture, so no type-4 activity really does
+                    # mean the custom status was cleared. Guarded on `status` because a
+                    # payload we couldn't read at all yields (None, None) -- not a clear.
+                    await self._observe_presence(status, custom or CustomStatus())
+            elif t == "PRESENCE_UPDATE":
+                # Mostly friends' presence; only our own is interesting, and only for the
+                # dot -- one guild's view isn't authoritative enough to clear a custom
+                # status on. Redundant with SESSIONS_REPLACE; the dedupe absorbs that.
+                d = msg.get("d") or {}
+                if self._user_id and (d.get("user") or {}).get("id") == self._user_id:
+                    await self._observe_presence(d.get("status"), None)
         elif op == 1:  # server-requested heartbeat
             await self._send({"op": 1, "d": self._seq})
         elif op == 7:  # RECONNECT
@@ -323,11 +416,13 @@ class GatewayConnection:
             if emoji:
                 activity["emoji"] = emoji
             activities.append(activity)
+        status = self._effective_status()
         return {
-            "status": self._effective_status(),
-            "since": 0,
+            "status": status,
+            # Discord wants a ms timestamp for idle ("idle since"); 0 for everything else.
+            "since": int(time.time() * 1000) if status == "idle" else 0,
             "activities": activities,
-            "afk": False,
+            "afk": self._effective_afk(),
         }
 
     # ---- helpers ---------------------------------------------------------

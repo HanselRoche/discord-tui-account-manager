@@ -6,7 +6,7 @@ from textual.app import App, ComposeResult
 from textual.containers import Vertical
 from textual.widgets import Footer, Header
 
-from .. import presence_config, vault
+from .. import presence_config, presence_sync, vault
 from ..batch import run_op
 from ..discord_api import ApiError, DiscordAPI
 from ..models import Account, ConnState, CustomStatus
@@ -48,7 +48,9 @@ class ManagerApp(App):
         super().__init__()
         self.accounts: list[Account] = []
         self.passphrase: str | None = None
-        self.presence = PresenceManager(on_state=self._on_conn_state)
+        self.presence = PresenceManager(
+            on_state=self._on_conn_state, on_presence=self._on_presence
+        )
         self._table: AccountsTable | None = None
         self._log: LogPane | None = None
 
@@ -83,9 +85,14 @@ class ManagerApp(App):
         self._table.refresh_rows()
         self._log.info(f"vault unlocked: {len(self.accounts)} account(s)")
         # Bring everyone online (restoring each account's saved status/custom status from
-        # presence.json, same as the daemon), then refresh identities.
+        # presence.json, same as the daemon, but adopting anything changed from another
+        # device while we were closed), then refresh identities.
         self.run_worker(
-            self.presence.start_all(self.accounts, presence_for=presence_config.for_label),
+            self.presence.start_all(
+                self.accounts,
+                presence_for=presence_config.for_label,
+                reconcile=presence_sync.reconcile,
+            ),
             exclusive=False,
         )
         for acc in self.accounts:
@@ -98,13 +105,39 @@ class ManagerApp(App):
     # ---- gateway state callback -----------------------------------------
 
     def _on_conn_state(self, key: str, state: ConnState) -> None:
-        for acc in self.accounts:
-            if acc.label == key:
-                acc.conn_state = state
-                self._log.info(f"{acc.label} · {acc.ign}: {state.value}")
-                if self._table is not None:
-                    self._table.refresh_rows()
-                break
+        acc = self._find(key)
+        if acc is None:
+            return
+        acc.conn_state = state
+        self._log.info(f"{acc.label} · {acc.ign}: {state.value}")
+        if self._table is not None:
+            self._table.refresh_rows()
+
+    def _find(self, key: str) -> Account | None:
+        return next((a for a in self.accounts if a.label == key), None)
+
+    # ---- live presence from another device -------------------------------
+
+    def _on_presence(self, key: str, status: str | None, custom: CustomStatus | None) -> None:
+        """A status was set elsewhere (phone, desktop client) -- reported live by the
+        gateway, or found by the startup reconcile if it happened while we were closed.
+
+        Last write wins: it updates the table and overwrites presence.json, so a later
+        daemon start restores what was actually set last.
+        """
+        acc = self._find(key)
+        if acc is None:
+            return
+        if status is not None:
+            acc.status = status
+        if custom is not None:
+            acc.custom_status = custom.display() or None
+        presence_config.set_for(acc.label, status=status, custom=custom)
+        self._log.info(
+            f"{acc.label} · {acc.ign}: changed elsewhere -> {acc.status_display}"
+        )
+        if self._table is not None:
+            self._table.refresh_rows()
 
     # ---- identity refresh -----------------------------------------------
 
@@ -174,6 +207,13 @@ class ManagerApp(App):
         acc.global_name = me.get("global_name")
         acc.status = settings.get("status")
         acc.custom_status = _fmt_custom(settings.get("custom_status"))
+        # We just read Discord's settings: record them, so the next start doesn't report
+        # this account's pre-existing status as a change made elsewhere.
+        presence_config.set_seen(
+            acc.label,
+            acc.status,
+            CustomStatus.from_settings(settings.get("custom_status")) or CustomStatus(),
+        )
         self.accounts.append(acc)
         self._persist()
         self._table.refresh_rows()

@@ -1,7 +1,8 @@
 """High-level operations mapping a chosen action + value to an API call.
 
-HTTP ops go through `DiscordAPI`. The presence op (live dot + custom status) is
-handled by the presence manager over the gateway, not here -- see `presence_manager`.
+HTTP ops go through `DiscordAPI`. Presence (dot + custom status) is written here too,
+because Discord stores it account-level; the *live* half of it -- making the change show
+immediately on an open session -- belongs to `presence_manager` over the gateway.
 """
 from __future__ import annotations
 
@@ -71,11 +72,27 @@ async def run_http_op(account: Account, kind: OpKind, value: str) -> str:
             cs = CustomStatus.parse(value)
             await api.set_settings_custom_status(cs.text, cs.emoji_name, cs.emoji_id)
             return "custom status updated"
+        if kind is OpKind.PRESENCE:
+            # Account-level, so the dot survives this process and reaches other devices.
+            # The live dot still goes over the gateway; see batch.run_op.
+            await api.set_settings_status(value.strip())
+            return "presence updated"
         raise ValueError(f"{kind} is not an HTTP op")
+
+
+async def fetch_presence(account: Account) -> tuple[str | None, CustomStatus]:
+    """Read the account's presence as Discord has it stored: (dot, custom status).
+
+    This is the account-level setting, not per-session state -- it is what a phone sets
+    and what survives every client disconnecting. An empty CustomStatus means "none set".
+    """
+    async with DiscordAPI(account.token) as api:
+        settings = await api.get_settings()
+    custom = CustomStatus.from_settings(settings.get("custom_status")) or CustomStatus()
+    return settings.get("status"), custom
 
 
 async def pull_custom_status(account: Account) -> CustomStatus:
     """Read the account's current custom status from Discord (exact emoji included)."""
-    async with DiscordAPI(account.token) as api:
-        settings = await api.get_settings()
-    return CustomStatus.from_settings(settings.get("custom_status")) or CustomStatus()
+    _, custom = await fetch_presence(account)
+    return custom

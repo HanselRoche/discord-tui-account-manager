@@ -16,8 +16,17 @@ VPS over SSH.
 - **Always online:** one persistent gateway WebSocket per account (IDENTIFY +
   heartbeat + auto-reconnect). The online dot only shows while that socket is open, so
   the process must keep running (see *VPS* below).
-- **Live presence** (online/idle/dnd/invisible + custom status) is pushed over the
-  gateway. **Profile edits** (bio, name, avatar, banner) go over HTTPS.
+- **Presence** (online/idle/dnd/invisible + custom status) is written to your Discord
+  account settings over HTTPS *and* pushed live over the gateway. Account-level means it
+  outlives the process and reaches your other devices — set `invisible` here and your
+  phone goes invisible too. **Profile edits** (bio, name, avatar, banner) are HTTPS only.
+- **Two-way presence sync — last write wins.** Whichever side changed it most recently
+  (here or your phone) is what gets stored and re-applied:
+  - *While running:* the gateway reports the change, so the TUI table updates on its own
+    and `data/presence.json` is rewritten — no refresh needed.
+  - *While stopped:* the next start reads Discord's settings and adopts anything that
+    changed since it last looked, so a status set on your phone overnight is not
+    overwritten when the daemon comes back up.
 - **Tokens** live in `data/tokens.enc`, encrypted with a passphrase (PBKDF2 + Fernet).
   The passphrase is never stored. `data/` is gitignored.
 
@@ -86,10 +95,39 @@ with an explicit `"status"` is enforced. A **missing** entry (or `"status": null
 from the phone) instead of being forced `online`:
 ```json
 {
-  "alt-1": { "status": "dnd",  "custom": "grinding" },
-  "alt-2": { "status": "idle", "custom": null }
+  "alt-1": { "status": "dnd",  "custom": "grinding",
+             "seen": { "status": "dnd", "custom": "grinding" } },
+  "alt-2": { "status": "idle", "custom": null },
+  "main":  { "status": "online", "afk": true }
 }
 ```
+
+This file is also **written back** whenever a status changes from another device, so it
+always holds the most recent value rather than the last one you typed here.
+
+`seen` is bookkeeping — what Discord's own settings said the last time we looked. Startup
+compares against it to tell *"the phone changed this while we were down"* (adopt it) from
+*"we set this ourselves last run"* (keep it). Don't hand-edit it. Entries that predate it
+have no `seen` yet, so the first start after upgrading only records the snapshot and
+adopts nothing; every start after that is authoritative.
+
+Hand-edit the rest only while nothing is running — a live daemon overwrites your edit the
+next time Discord reports a change.
+
+#### `afk` — keep getting phone notifications
+
+`"afk"` defaults to **`true`** and is **invisible to other users** (the visible dot is
+`status` alone). It's the same flag the real Discord client sets when its window loses
+focus, and it's what tells Discord's push service *"deliver pings and DMs to my phone, I'm
+not watching this client."*
+
+This matters because the daemon's socket looks like an always-on, always-active desktop
+client. Without `afk`, Discord assumes you'll see every mention right here and **silently
+stops pushing to your phone** for that account. Leave it alone unless you specifically want
+an account to swallow mobile notifications — then set `"afk": false`.
+
+If pings still don't reach your phone, escalate: set that account to `"status": "idle"` as
+well (exactly what the real client sends when auto-idling — costs you the green dot).
 
 ### Run in the background on a VPS (systemd)
 
@@ -180,9 +218,10 @@ there's no conflict. What takes effect depends on the edit:
 |------|-------------------------------|
 | Bio / display name / username / avatar / banner | **Instantly** — one-shot HTTPS, daemon-independent. |
 | Add / delete token | **After a daemon restart** — the account list is read once at startup. |
-| Presence / custom status | **After a daemon restart** — presence is read once at startup. (The TUI pushes it live *while open*, but that connection closes on quit.) |
+| Presence / custom status | **Instantly** — written to your account settings over HTTPS, and Discord echoes it to every open session, so the running daemon picks it up without a restart. |
+| `afk` in `presence.json` | **After a daemon restart** — read once at startup, and never reported back by Discord (it's session-local). |
 
-So after adding a token or changing presence, apply it to the 24/7 process:
+So after adding a token, apply it to the 24/7 process:
 ```bash
 systemctl --user restart discord-daemon
 ```
@@ -201,6 +240,7 @@ src/presence_config.py      plain-JSON per-account presence (shared TUI <-> daem
 src/discord_api.py          async HTTP client (rate-limit aware)
 src/gateway.py              persistent gateway WebSocket per account
 src/presence_manager.py     owns all gateway connections
+src/presence_sync.py        startup reconcile: adopt changes made while we were down
 src/ops.py                  operation registry + HTTP dispatch
 src/batch.py                run an op across accounts (sequential + jitter)
 src/tui/                    Textual UI (app, accounts, edit, log, modals)

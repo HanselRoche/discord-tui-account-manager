@@ -16,8 +16,8 @@ import os
 import signal
 from getpass import getpass
 
-from src import presence_config, vault
-from src.models import ConnState
+from src import presence_config, presence_sync, vault
+from src.models import ConnState, CustomStatus
 from src.presence_manager import PresenceManager
 
 log = logging.getLogger("daemon")
@@ -32,6 +32,20 @@ def _get_passphrase() -> str:
 
 def _on_state(label: str, state: ConnState) -> None:
     log.info("account %s -> %s", label, state.value)
+
+
+def _on_presence(label: str, status: str | None, custom: CustomStatus | None) -> None:
+    """Presence set from another device (phone, desktop client). Last write wins, so
+    store it: a later restart then restores what was actually set last."""
+    presence_config.set_for(label, status=status, custom=custom)
+    # None = this change said nothing about that field; an empty CustomStatus = cleared.
+    if custom is None:
+        shown = "unchanged"
+    else:
+        shown = custom.display() or "cleared"
+    log.info(
+        "account %s changed elsewhere -> %s / %s", label, status or "unchanged", shown
+    )
 
 
 async def _amain() -> int:
@@ -52,8 +66,12 @@ async def _amain() -> int:
         return 1
     log.info("vault loaded: %d account(s)", len(accounts))
 
-    presence = PresenceManager(on_state=_on_state)
-    await presence.start_all(accounts, presence_for=presence_config.for_label)
+    presence = PresenceManager(on_state=_on_state, on_presence=_on_presence)
+    await presence.start_all(
+        accounts,
+        presence_for=presence_config.for_label,
+        reconcile=presence_sync.reconcile,
+    )
 
     # Wait for SIGINT/SIGTERM, then shut down cleanly.
     stop = asyncio.Event()

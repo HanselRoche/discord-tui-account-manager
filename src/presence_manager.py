@@ -3,7 +3,8 @@
 Started at launch: every account gets a `GatewayConnection` (staggered to avoid an
 identical login burst). Exposes `set_presence` so the TUI can change the dot / custom
 status live over the gateway. Connection state changes flow back to a callback so the
-accounts table can reflect online / connecting / dead.
+accounts table can reflect online / connecting / dead, and presence changes made from
+another device flow back through `on_presence`.
 """
 from __future__ import annotations
 
@@ -11,17 +12,23 @@ import asyncio
 import random
 from typing import Awaitable, Callable
 
-from .gateway import GatewayConnection
+from .gateway import GatewayConnection, PresenceCallback
 from .models import Account, ConnState, CustomStatus
 
 StateCallback = Callable[[str, ConnState], Awaitable[None] | None]
 PresenceLookup = Callable[[str], dict]
+Reconcile = Callable[[Account], Awaitable[tuple[str | None, CustomStatus | None]]]
 
 
 class PresenceManager:
-    def __init__(self, on_state: StateCallback | None = None):
+    def __init__(
+        self,
+        on_state: StateCallback | None = None,
+        on_presence: PresenceCallback | None = None,
+    ):
         self._conns: dict[str, GatewayConnection] = {}
         self._on_state = on_state
+        self._on_presence = on_presence
 
     def _key(self, account: Account) -> str:
         # Label is stable and enforced-unique at add time; the gateway needs a key
@@ -29,26 +36,52 @@ class PresenceManager:
         return account.label
 
     async def start_all(
-        self, accounts: list[Account], presence_for: PresenceLookup | None = None
+        self,
+        accounts: list[Account],
+        presence_for: PresenceLookup | None = None,
+        reconcile: Reconcile | None = None,
     ) -> None:
         """Bring every account online, staggering connects.
 
-        `presence_for(label) -> {"status", "custom"}` optionally sets each account's
+        `presence_for(label) -> {"status", "custom", "afk"}` optionally sets each account's
         initial presence (used by the daemon to restore stored status). Defaults to
         online / no custom status.
+
+        `reconcile(account) -> (status, custom)` optionally reports what Discord changed
+        while we were down; whatever it returns wins over the stored config and is passed
+        to `on_presence` so the caller can persist it. See `presence_sync`.
         """
         for i, acc in enumerate(accounts):
             p = presence_for(acc.label) if presence_for else None
-            self.add(
-                acc,
-                status=(p or {}).get("status"),
-                custom=(p or {}).get("custom"),
-            )
+            status = (p or {}).get("status")
+            custom = (p or {}).get("custom")
+            if reconcile is not None:
+                changed_status, changed_custom = await reconcile(acc)
+                status = changed_status if changed_status is not None else status
+                custom = changed_custom if changed_custom is not None else custom
+                if (changed_status, changed_custom) != (None, None):
+                    await self._report_presence(acc, changed_status, changed_custom)
+            self.add(acc, status=status, custom=custom, afk=(p or {}).get("afk"))
             if i < len(accounts) - 1:
                 await asyncio.sleep(random.uniform(0.5, 2.5))
 
+    async def _report_presence(
+        self, account: Account, status: str | None, custom: CustomStatus | None
+    ) -> None:
+        """Hand an externally-made change to the same callback the gateway uses, so the
+        caller persists / logs / redraws it in one place."""
+        if self._on_presence is None:
+            return
+        res = self._on_presence(self._key(account), status, custom)
+        if asyncio.iscoroutine(res):
+            await res
+
     def add(
-        self, account: Account, status: str | None = None, custom: CustomStatus | None = None
+        self,
+        account: Account,
+        status: str | None = None,
+        custom: CustomStatus | None = None,
+        afk: bool | None = None,
     ) -> None:
         """Start (or restart) a connection for one account."""
         key = self._key(account)
@@ -59,7 +92,9 @@ class PresenceManager:
             token=account.token,
             status=status,
             custom_status=custom,
+            afk=afk,
             on_state=self._on_state,
+            on_presence=self._on_presence,
         )
         self._conns[key] = conn
         conn.start()
@@ -79,6 +114,7 @@ class PresenceManager:
         accounts: list[Account],
         status: str | None = None,
         custom: CustomStatus | None = None,
+        afk: bool | None = None,
     ) -> list[tuple[str, bool, str]]:
         """Push a live presence change to the given accounts. Returns per-account results."""
         results: list[tuple[str, bool, str]] = []
@@ -91,7 +127,7 @@ class PresenceManager:
                 results.append((acc.display, False, "token dead"))
                 continue
             try:
-                await conn.update_presence(status=status, custom=custom)
+                await conn.update_presence(status=status, custom=custom, afk=afk)
                 what = status or ""
                 if custom is not None:
                     what = f"{what} / {custom.display()}".strip(" /")
